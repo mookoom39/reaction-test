@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Профессиональный тест реакции</title>
+    <style>
+        /* Красное мигание при фальстарте: два быстрых удара */
+        @keyframes falseStart {
+            0%   { background: #ff1744; }
+            25%  { background: #1e1e1e; }
+            50%  { background: #ff1744; }
+            100% { background: #1e1e1e; }
+        }
+        .false-start { animation: falseStart 0.5s ease-out; }
+
+        /* Лёгкая тряска надписи при фальстарте */
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            20% { transform: translateX(-10px); }
+            40% { transform: translateX(10px); }
+            60% { transform: translateX(-6px); }
+            80% { transform: translateX(6px); }
+        }
+        .shake { animation: shake 0.4s; }
+    </style>
+</head>
+<body style="background:#1e1e1e; display:flex; justify-content:center; align-items:center; height:100vh; font-family:sans-serif; color:white; margin:0; user-select:none; overflow:hidden;" id="screen">
+
+    <!-- Основной блок по центру -->
+    <div style="text-align:center; flex-grow:1; max-width:600px; padding:20px;">
+        <div id="text" style="font-size:36px; font-weight:bold; margin-bottom:20px;">Нажмите для старта</div>
+        <div id="record" style="font-size:18px; color:#aaa; margin-bottom:10px;">Рекорд: -- мс</div>
+        <div id="average" style="font-size:18px; color:#64b5f6; font-weight:bold; margin-bottom:25px;">Среднее (за все клики): -- мс</div>
+
+        <label id="soundToggle" style="font-size:14px; color:#aaa; cursor:pointer; display:inline-flex; align-items:center; gap:8px;">
+            <input type="checkbox" id="soundCheck" checked style="cursor:pointer;">
+            🔊 Звуковой сигнал
+        </label>
+        <div style="font-size:12px; color:#666; margin-top:10px; line-height:1.5;">
+            ℹ️ Со звуком результат обычно чуть выше, чем в чисто визуальном тесте,<br>
+            особенно на Bluetooth-наушниках. Для честного сравнения попробуйте с выключенным звуком.
+        </div>
+    </div>
+
+    <!-- Панель истории справа -->
+    <div style="width:240px; background:#2d2d2d; height:100vh; padding:20px; box-sizing:border-box; border-left:2px solid #333; display:flex; flex-direction:column;" id="sidebar">
+        <div style="font-size:18px; font-weight:bold; border-bottom:1px solid #444; padding-bottom:10px; margin-bottom:10px; text-align:center;">Последние 20 кликов:</div>
+        <div id="history" style="font-size:16px; color:#ccc; line-height:1.5; font-family:monospace; display:flex; flex-direction:column; gap:2px; overflow-y:auto; flex-grow:1; margin-bottom:15px;"></div>
+
+        <!-- Легенда цветов -->
+        <div style="font-size:11px; color:#888; margin-bottom:12px; line-height:1.6;">
+            <span style="color:#3ebd5b;">●</span> до 200 мс &nbsp;
+            <span style="color:#c0ca33;">●</span> до 250 мс<br>
+            <span style="color:#ffb74d;">●</span> до 300 мс &nbsp;
+            <span style="color:#e57373;">●</span> медленнее
+        </div>
+
+        <button id="resetBtn" style="width:100%; padding:10px; background:#bc3b3b; color:white; border:none; border-radius:4px; font-weight:bold; cursor:pointer; font-size:14px;">Сбросить историю</button>
+    </div>
+
+<script>
+let state = "idle", timer, start;
+let bestRecord = Infinity;
+let clickHistory = [];   // теперь храним числа, а не строки - нужно для раскраски
+let allTimes = [];
+
+const screen = document.getElementById("screen");
+const text = document.getElementById("text");
+const recordDisplay = document.getElementById("record");
+const averageDisplay = document.getElementById("average");
+const historyDisplay = document.getElementById("history");
+const resetBtn = document.getElementById("resetBtn");
+const soundCheck = document.getElementById("soundCheck");
+
+// Цвет результата по скорости
+function colorFor(ms) {
+    if (ms < 200) return "#3ebd5b";
+    if (ms < 250) return "#c0ca33";
+    if (ms < 300) return "#ffb74d";
+    return "#e57373";
+}
+
+// Создаем встроенный чистый звук, чтобы не скачивать файлы
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playBeep() {
+    if (!soundCheck.checked) return;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.frequency.setValueAtTime(800, audioCtx.currentTime); // Высокий приятный писк
+    gain.gain.setValueAtTime(0.1, audioCtx.currentTime); // Громкость
+    osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+}
+
+// Красное мигание + тряска при фальстарте
+function flashFalseStart() {
+    screen.classList.remove("false-start");
+    text.classList.remove("shake");
+    void screen.offsetWidth; // перезапуск анимации, если фальстарт подряд
+    screen.classList.add("false-start");
+    text.classList.add("shake");
+    setTimeout(() => {
+        screen.classList.remove("false-start");
+        text.classList.remove("shake");
+    }, 550);
+}
+
+function renderHistory() {
+    historyDisplay.innerHTML = clickHistory
+        .map((val, idx) => `<div style="color:${colorFor(val)};">${idx + 1}. ${val} мс</div>`)
+        .join("");
+}
+
+screen.addEventListener("pointerdown", (e) => {
+    // Если кликнули на боковую панель, кнопку или переключатель звука — не запускаем тест
+    if (e.clientX > window.innerWidth - 240) return;
+    if (e.target.closest("#soundToggle")) return;
+    e.preventDefault();
+
+    if (state === "idle") {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        text.style.color = "white";
+        screen.style.background = "#bc3b3b";
+        text.innerText = "Ждите зеленый цвет и звук...";
+        state = "waiting";
+        timer = setTimeout(() => {
+            screen.style.background = "#3ebd5b";
+            text.innerText = "КЛИКАЙ!";
+            state = "go";
+            playBeep(); // Звуковой сигнал срабатывает одновременно с зеленым
+            start = performance.now();
+        }, 1500 + Math.random() * 2500);
+
+    } else if (state === "waiting") {
+        clearTimeout(timer);
+        screen.style.background = "#1e1e1e";
+        text.style.color = "#ff5252";
+        text.innerText = "Рано! Нажмите для повтора";
+        state = "idle";
+        flashFalseStart();
+
+    } else if (state === "go") {
+        let diff = Math.round(performance.now() - start);
+        screen.style.background = "#1e1e1e";
+        text.style.color = colorFor(diff);
+        text.innerText = diff + " мс";
+        state = "idle";
+
+        // Обновляем рекорд
+        if (diff < bestRecord) {
+            bestRecord = diff;
+            recordDisplay.innerText = "🏆 Рекорд: " + bestRecord + " мс";
+            recordDisplay.style.color = "#3ebd5b";
+            recordDisplay.style.fontWeight = "bold";
+        }
+
+        // Считаем общее среднее
+        allTimes.push(diff);
+        let sum = allTimes.reduce((a, b) => a + b, 0);
+        let avg = Math.round(sum / allTimes.length);
+        averageDisplay.innerText = "Среднее (за все клики): " + avg + " мс";
+
+        // Добавляем в историю (лимит 20 штук)
+        clickHistory.unshift(diff);
+        if (clickHistory.length > 20) clickHistory.pop();
+        renderHistory();
+    }
+});
+
+// Кнопка сброса
+resetBtn.addEventListener("click", (e) => {
+    e.stopPropagation(); // Чтобы клик по кнопке не запускал сам тест
+    clickHistory = [];
+    allTimes = [];
+    bestRecord = Infinity;
+    recordDisplay.innerText = "Рекорд: -- мс";
+    recordDisplay.style.color = "#aaa";
+    recordDisplay.style.fontWeight = "normal";
+    averageDisplay.innerText = "Среднее (за все клики): -- мс";
+    historyDisplay.innerHTML = "";
+    text.style.color = "white";
+    text.innerText = "Нажмите для старта";
+});
+</script>
+</body>
+</html>
